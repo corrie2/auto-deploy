@@ -7,6 +7,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .tmp-tests/
+tests/test_deploy_agent.py
 dist/
 build/
 *.egg-info/
