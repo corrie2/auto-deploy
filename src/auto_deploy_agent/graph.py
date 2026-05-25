@@ -6,7 +6,15 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
+from auto_deploy_agent.command_analysis import (
+    PackageInstallRequest,
+    normalize_execution_command,
+    package_install_request,
+    plan_uses_project_venv,
+    project_venv_path,
+)
 from auto_deploy_agent.local import (
+    check_healthcheck_url,
     check_local_prerequisites,
     clone_or_update_repo,
     inspect_project,
@@ -77,10 +85,11 @@ def validate_plan(state_data: AgentState | dict[str, Any]) -> dict[str, Any]:
 
     errors = list(state.errors)
     for command in state.plan.commands:
-        try:
-            validate_local_command(command.command)
-        except ValueError as exc:
-            errors.append(str(exc))
+        if not _is_shell_healthcheck_command(command.command):
+            try:
+                validate_local_command(command.command)
+            except ValueError as exc:
+                errors.append(str(exc))
         try:
             resolve_command_cwd(Path(state.project_dir), command.cwd)
         except ValueError as exc:
@@ -101,12 +110,31 @@ def execute_plan(state_data: AgentState | dict[str, Any]) -> dict[str, Any]:
     command_env = state.plan.environment
 
     try:
+        command_strings = [command.command for command in state.plan.commands]
+        use_project_venv = plan_uses_project_venv(command_strings)
+        install_requests = [
+            request
+            for command in state.plan.commands
+            if not _is_shell_healthcheck_command(command.command)
+            for request in [package_install_request(command.command)]
+            if request is not None
+        ]
+        if install_requests and not _confirm_package_installs(install_requests, project_dir, use_project_venv):
+            errors.append("Package installation was not approved by user.")
+            return {
+                "results": [result.model_dump() for result in results],
+                "errors": errors,
+            }
+
         for command in state.plan.commands:
+            if _is_shell_healthcheck_command(command.command):
+                continue
             cwd = resolve_command_cwd(project_dir, command.cwd)
+            execution_command = normalize_execution_command(command.command, project_dir, use_project_venv)
             if command.phase == "start":
-                result = start_background_command(command.command, cwd, command.name, env=command_env)
+                result = start_background_command(execution_command, cwd, command.name, env=command_env)
             else:
-                result = run_command(command.command, cwd, command.name, command.timeout_seconds, env=command_env)
+                result = run_command(execution_command, cwd, command.name, command.timeout_seconds, env=command_env)
             results.append(result)
             if result.exit_status != 0:
                 errors.append(
@@ -114,6 +142,11 @@ def execute_plan(state_data: AgentState | dict[str, Any]) -> dict[str, Any]:
                     f"{result.stderr or result.stdout}"
                 )
                 break
+        if not errors and state.plan.healthcheck_url:
+            result = check_healthcheck_url(state.plan.healthcheck_url)
+            results.append(result)
+            if result.exit_status != 0:
+                errors.append(f"Healthcheck failed: {result.stderr or result.stdout}")
     except Exception as exc:
         errors.append(f"Deployment execution failed: {exc}")
 
@@ -126,6 +159,60 @@ def execute_plan(state_data: AgentState | dict[str, Any]) -> dict[str, Any]:
 def has_errors(state_data: AgentState | dict[str, Any]) -> str:
     state = _state(state_data)
     return "stop" if state.errors else "continue"
+
+
+def _is_shell_healthcheck_command(command: str) -> bool:
+    normalized = command.strip().lower()
+    return (
+        normalized.startswith("curl ")
+        or normalized.startswith("wget ")
+        or normalized.startswith("powershell ")
+        or normalized.startswith("pwsh ")
+    ) and ("localhost" in normalized or "127.0.0.1" in normalized or "::1" in normalized)
+
+
+def _confirm_package_installs(requests: list[PackageInstallRequest], project_dir: Path, use_project_venv: bool) -> bool:
+    packages = sorted({package for request in requests for package in request.packages})
+    requirement_files = sorted({file for request in requests for file in request.requirement_files})
+    editable_installs = sorted({path for request in requests for path in request.editable_installs})
+    sources = sorted({source for request in requests for source in request.sources})
+    project_installs = sorted({item for request in requests for item in request.project_installs})
+
+    print()
+    print("This deployment plan wants to install Python packages.")
+    if use_project_venv:
+        print(f"Install target: {project_venv_path(project_dir)}")
+    else:
+        print("Install target: current auto-deploy-agent Python environment")
+    if packages:
+        print("Packages:")
+        for package in packages:
+            print(f"  - {package}")
+    if requirement_files:
+        print("Requirement files:")
+        for file in requirement_files:
+            print(f"  - {file}")
+    if editable_installs:
+        print("Editable installs:")
+        for path in editable_installs:
+            print(f"  - {path}")
+    if project_installs:
+        print("Project dependency installs:")
+        for item in project_installs:
+            print(f"  - {item}")
+    if sources:
+        print("Package indexes/sources:")
+        for source in sources:
+            print(f"  - {source}")
+    print("Install commands:")
+    for request in requests:
+        print(f"  - {request.command}")
+
+    try:
+        answer = input("Approve package installation? [y/N]: ").strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
 
 
 def build_graph():

@@ -6,6 +6,7 @@ import subprocess
 import time
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from auto_deploy_agent.models import CommandResult, ProjectInspection
 
@@ -151,6 +152,42 @@ def start_background_command(
     )
 
 
+def check_healthcheck_url(url: str, timeout_seconds: int = 60) -> CommandResult:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Healthcheck URL must use http or https: {url}")
+    if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError(f"Healthcheck URL must target localhost: {url}")
+
+    deadline = time.monotonic() + timeout_seconds
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            request = Request(url, method="GET")
+            with urlopen(request, timeout=5) as response:
+                status = response.status
+                if 200 <= status < 400:
+                    return CommandResult(
+                        name="healthcheck",
+                        command=f"GET {url}",
+                        exit_status=0,
+                        stdout=f"HTTP {status}",
+                        stderr="",
+                    )
+                last_error = f"HTTP {status}"
+        except Exception as exc:
+            last_error = str(exc)
+        time.sleep(2)
+
+    return CommandResult(
+        name="healthcheck",
+        command=f"GET {url}",
+        exit_status=1,
+        stdout="",
+        stderr=f"Healthcheck failed for {url}: {last_error}",
+    )
+
+
 def resolve_command_cwd(project_dir: Path, command_cwd: str | None) -> Path:
     project_root = project_dir.resolve()
     cwd = project_root if command_cwd is None else Path(command_cwd)
@@ -178,6 +215,8 @@ def _run(
         cwd=str(cwd),
         shell=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         timeout=timeout_seconds,
         env=_merged_env(env),
@@ -250,6 +289,8 @@ def _normalized_repo_url(repo: str) -> str:
 
 def _merged_env(extra: dict[str, str] | None) -> dict[str, str]:
     merged = os.environ.copy()
+    merged.setdefault("PYTHONUTF8", "1")
+    merged.setdefault("PYTHONIOENCODING", "utf-8")
     if extra:
         merged.update({key: str(value) for key, value in extra.items()})
     return merged

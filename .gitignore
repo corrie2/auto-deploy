@@ -11,3 +11,9 @@ tests/test_deploy_agent.py
 dist/
 build/
 *.egg-info/
+*.pptx
+~$*.pptx
+details.txt
+error.txt
+generated_code_blocks/
+generated_demo_blocks/

@@ -24,10 +24,23 @@ Rules:
 - Prefer project README instructions.
 - Prefer existing package managers and lockfiles.
 - Generate commands for the current local operating system.
+- Do not join commands with &&, ;, pipes, redirects, or shell-specific control operators.
+- Return one command object per install/build/start step.
 - The runner starts commands with phase=start as background processes, so start commands do not need nohup.
 - For start commands, use the normal foreground dev/server command such as npm run dev, pnpm dev, python app.py, or docker compose up.
+- Do not generate curl, wget, or shell-based HTTP healthcheck commands.
+- Put the local service healthcheck endpoint in healthcheck_url instead of a verify command.
 - Do not use destructive commands.
 - Do not install random global packages unless the README or detected stack needs them.
+- Do not use conda activate. On Windows, use conda run -n <env> python -m pip install ... and conda run -n <env> python script.py.
+- Do not create global Conda environments unless the project has a real Conda-only dependency such as environment.yml or conda-only packages.
+- If the README asks to create a generic Python environment, prefer python -m venv .deploy-agent\\venv inside the project directory.
+- Prefer python -m pip install over bare pip install when running inside a Python or Conda environment.
+- If a pip command uses --index-url or --extra-index-url for a special package index, install only packages from that index in that command.
+- For PyTorch CPU wheels, install torch/torchvision/torchaudio with https://download.pytorch.org/whl/cpu in a separate command from normal PyPI packages such as numpy, jupyterlab, fastapi, uvicorn, or python-multipart.
+- If the project uses a checked-in .venv, use .venv\\Scripts\\python.exe on Windows or .venv/bin/python on Unix.
+- If the project uses uv, prefer uv sync for project dependencies and uv run <command> for runtime commands.
+- If the project uses Poetry, prefer poetry install for project dependencies and poetry run <command> for runtime commands.
 - If environment variables are needed but not provided, list them in assumptions and use safe placeholders.
 - Return commands in execution order.
 - Return only valid JSON. Do not wrap the JSON in markdown fences.
@@ -64,10 +77,11 @@ Return a JSON object matching this schema:
       "timeout_seconds": 600
     }}
   ],
-  "healthcheck_url": null
+  "healthcheck_url": "http://localhost:8000/health or null"
 }}
 
 Allowed command phases: install, build, start, verify, other.
+Do not include verify commands for HTTP healthchecks. The runner verifies healthcheck_url itself.
 
 README:
 {project.readme}
